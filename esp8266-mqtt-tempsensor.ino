@@ -2,14 +2,12 @@
 #define PIN_SIGNAL 15 //pin where locate Signal LED
 #define PIN_OWIRE  13 //pin where locate temperature sensor
 
-bool signalLEDstate = true;
-
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #define MQTT_KEEPALIVE 5
 
 #include <timeouter.h>
-timeouter waitTemperature;
+timeouter waitPublish;
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -20,7 +18,7 @@ DallasTemperature sensors(&oneWire);
 // Update these with values suitable for your network.
 const char* ssid     = ssid_ext;
 const char* password = password_ext;
-int status = WL_IDLE_STATUS;     // the Wifi radio's status
+        int status   = WL_IDLE_STATUS;     // the Wifi radio's status
 
 /*
 const char* mqtt_server = "broker.hivemq.com";
@@ -42,8 +40,9 @@ PubSubClient client(mqtt_server, mqtt_port, callback, espClient);
     long lastMsg = 0;
     char msg[50];
      int value = 0;
-    bool button_state = false;
+    bool alarm_state = false;
 uint32_t ms_button = 0;
+    bool signalLEDstate = true;
 
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
@@ -68,7 +67,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if (String(topic) == "tempsensor/reset") {
     // Switch on the LED if an 1 was received as first character
     if ((char)payload[0] == '1') {
-      ESP.restart();
+      //ESP.restart();
       Serial.println("reset");
     }
   }
@@ -79,7 +78,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       value += (char)payload[i];
     }
     float som = value.toInt();
-    waitTemperature.setDelay((1/som)*120000);
+    waitPublish.setDelay((1/som)*120000);
   } 
 }
 
@@ -124,14 +123,17 @@ void reconnect() {
 }
 
 void setup() {
+  WiFi.mode(WIFI_STA);
+  
   pinMode     (PIN_SIGNAL, OUTPUT);// Initialize the BUILTIN_LED pin as an output
-  digitalWrite(PIN_SIGNAL, LOW);  // Turn the LED off 
-  pinMode     (PIN_ALARM,  INPUT);
+  digitalWrite(PIN_SIGNAL, LOW);   // Turn the LED off 
+  pinMode     (PIN_ALARM,  INPUT); // Initialize pin for boiler error readings
+  pinMode     (A0,         INPUT); // Initialize ADC for voltage measurement
   
   Serial.begin(115200);
   
-  waitTemperature.setDelay(120000);
-  waitTemperature.start();
+  waitPublish.setDelay(120000);
+  waitPublish.start();
   randomSeed(micros());
 }
 
@@ -165,24 +167,33 @@ void loop() {
   }
   client.loop();
 
-  // work with temerature sensor
-  if (waitTemperature.isOver()) {
-    waitTemperature.start();
+  // work with all sensors and transmit data
+  if (waitPublish.isOver()) {
     sensors.requestTemperatures(); // от датчика получаем значение температуры
     dtostrf(sensors.getTempCByIndex(0), 6, 2, msg);
     client.publish("tempsensor/temp",msg); // отправляем в топик для термодатчика значение температуры
-  }
+    
+    float volt = (analogRead(A0)/1023.0)*5;
+    dtostrf(volt, 6, 2, msg);
+    client.publish("tempsensor/supplyVolt",msg); // отправляем в топик значение напряжения
+    if (volt < 3) {
+      client.publish("tempsensor/supplyPres", "1");
+    } else {
+      client.publish("tempsensor/supplyPres", "0");
+    }
+    
+    // Фиксируем наличие сигнала
+    if(digitalRead(PIN_ALARM) == LOW && !alarm_state){
+      alarm_state = true;
+      client.publish("tempsensor/pushbutton", "1");
+    }
+    // Фиксируем отсутствие сигнала
+    if(digitalRead(PIN_ALARM) == HIGH && alarm_state){
+      alarm_state = false;     
+      client.publish("tempsensor/pushbutton", "0");
+    }
 
-
-  // Фиксируем нажатие кнопки
-  if(digitalRead(PIN_ALARM) == LOW && !button_state){
-    button_state = true;
-    client.publish("tempsensor/pushbutton", "1");
+    waitPublish.start();
   }
-  // Фиксируем отпускание кнопки
-  if(digitalRead(PIN_ALARM) == HIGH && button_state){
-    button_state = false;     
-    client.publish("tempsensor/pushbutton", "0");
-  }
-  
+ 
 }
